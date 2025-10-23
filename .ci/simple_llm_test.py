@@ -5,6 +5,12 @@ Simple LLM Notebook Test Runner
 Uses the existing OpenVINO notebook validation infrastructure to test
 the 3 LLM topologies you specified.
 
+Requirements:
+  - Python 3.11 or 3.12 (Python 3.14+ not supported yet due to missing wheels)
+  - If behind a corporate proxy, set HTTP_PROXY and HTTPS_PROXY environment variables:
+    Windows: $env:HTTP_PROXY="http://proxy:port"; $env:HTTPS_PROXY="http://proxy:port"
+    Linux:   export HTTP_PROXY="http://proxy:port" HTTPS_PROXY="http://proxy:port"
+
 Usage examples:
   # Test all topologies on CPU
   python simple_llm_test.py --device cpu
@@ -17,6 +23,9 @@ Usage examples:
   
   # Create diff reports
   python simple_llm_test.py --topology phi-3.5 --create-diff
+  
+  # Reuse existing virtual environment
+  python simple_llm_test.py --reuse-venv --topology phi-3.5
 """
 
 import argparse
@@ -91,7 +100,11 @@ def setup_environment(openvino_version="nightly", optimum_intel_version="latest"
     """Setup environment with OpenVINO + optimum-intel using virtual environment."""
     global venv_python_path
     
-    venv_path = Path("llm_test_venv")
+    # Use shorter path on Windows to avoid path length issues
+    if sys.platform == "win32":
+        venv_path = Path("C:/venv_llm")
+    else:
+        venv_path = Path("llm_test_venv")
     
     # Check if we should reuse existing venv
     if reuse_venv and venv_path.exists():
@@ -111,6 +124,10 @@ def setup_environment(openvino_version="nightly", optimum_intel_version="latest"
         return True
     
     print(f"🔧 Setting up environment with OpenVINO {openvino_version} + optimum-intel {optimum_intel_version}")
+    
+    # Inherit proxy settings from environment if they exist
+    # Users behind corporate proxies should set HTTP_PROXY and HTTPS_PROXY
+    # environment variables before running this script
     
     # Set environment variables to disable interactive widgets when running headless
     os.environ["JUPYTER_PLATFORM_DIRS"] = "1"
@@ -174,55 +191,97 @@ def setup_environment(openvino_version="nightly", optimum_intel_version="latest"
         print(f"⚠️  Warning: pip upgrade had issues")
     
     # Install packages
+    # Handle different version specifications
     if openvino_version == "nightly":
-        ov_package = "openvino-nightly"
+        ov_packages = ["openvino", "openvino-tokenizers[transformers]", "openvino-genai"]
+        use_pre_flag = True
+        use_nightly_index = True
+    elif openvino_version == "latest" or openvino_version == "":
+        # Install latest available version without constraint
+        ov_packages = ["openvino", "openvino-tokenizers", "openvino-genai"]
+        use_pre_flag = False
+        use_nightly_index = False
     else:
-        ov_package = f"openvino=={openvino_version}"
+        # Specific version requested
+        ov_packages = [f"openvino=={openvino_version}", "openvino-tokenizers", "openvino-genai"]
+        use_pre_flag = False
+        use_nightly_index = False
     
-    # We'll install optimum-intel from git (like the notebook) instead of using version parameter
-    
-        # Core packages needed for notebook execution - matching notebook requirements exactly
-    packages = [
-        ov_package, 
-        "openvino-tokenizers[transformers]", "openvino-genai",
-        "torch>=2.1", "transformers==4.53.3", "gradio>=4.19", "ipywidgets", 
-        "nncf==2.15.0", "datasets<4.0.0", "accelerate", "huggingface-hub>=0.26.5",
-        "einops", "transformers_stream_generator", "tiktoken", "bitsandbytes",
+    # Core packages needed for notebook execution - matching notebook requirements exactly
+    # Use transformers<4.54 for compatibility with optimum-intel 1.25.2
+    core_packages = [
+        "transformers>=4.36,<4.54", "gradio>=4.19", "ipywidgets", 
+        "datasets", "accelerate", "huggingface-hub>=0.26.5",
+        "einops", "transformers_stream_generator", "tiktoken",
         "treon", "nbformat", "notebook", "jupyter", "ipykernel"
     ]
     
-    # Install optimum-intel from git (like the notebook does)
-    git_packages = ["git+https://github.com/huggingface/optimum-intel.git"]
+    # PyTorch CPU version - installed separately to ensure CPU-only version
+    # Use torch<2.9 for compatibility with optimum-intel
+    torch_packages = ["torch>=2.1,<2.9"]
     
-    # First uninstall any existing optimum packages (like the notebook does)
-    print("Uninstalling existing optimum packages...")
-    result = subprocess.run([str(venv_python), "-m", "pip", "uninstall", "-y", "optimum", "optimum-intel"], 
-                          capture_output=False, text=True, check=False)
-    print(f"   Uninstall completed with code: {result.returncode}")
+    # On Windows, install optimum-intel without building ONNX from source
+    # Install optimum-intel and its dependencies separately to avoid build issues
+    skip_optimum_intel = False
     
-    # Install packages with extra index for nightly builds
-    print("Installing core packages...")
-    print(f"📦 Installing {len(packages)} packages: {', '.join(packages[:5])}{'...' if len(packages) > 5 else ''}")
-    install_cmd = [str(venv_python), "-m", "pip", "install", "--pre"] + packages + [
-        "--extra-index-url", "https://storage.openvinotoolkit.org/simple/wheels/nightly",
-        "--extra-index-url", "https://download.pytorch.org/whl/cpu"
+    # Install PyTorch CPU version first to avoid CUDA dependencies
+    print("Installing PyTorch CPU version...")
+    torch_cmd = [str(venv_python), "-m", "pip", "install"] + torch_packages + [
+        "--index-url", "https://download.pytorch.org/whl/cpu"
     ]
-    result = subprocess.run(install_cmd, capture_output=False, text=True, check=False)
+    result = subprocess.run(torch_cmd, capture_output=False, text=True, check=False)
+    print(f"   PyTorch installation completed with code: {result.returncode}")
+    if result.returncode != 0:
+        print(f"⚠️  Warning: PyTorch installation had issues")
+    
+    # First install core packages without OpenVINO (these should always work from PyPI)
+    print("Installing core packages from PyPI...")
+    print(f"📦 Installing {len(core_packages)} core packages: {', '.join(core_packages[:5])}{'...' if len(core_packages) > 5 else ''}")
+    
+    core_install_cmd = [str(venv_python), "-m", "pip", "install", "-U"] + core_packages
+    result = subprocess.run(core_install_cmd, capture_output=False, text=True, check=False)
     print(f"   Core packages installation completed with code: {result.returncode}")
     if result.returncode != 0:
         print(f"⚠️  Warning: Core packages installation had issues")
     
-    # Install git packages separately
-    for package in git_packages:
-        print(f"Installing {package}...")
-        result = subprocess.run([str(venv_python), "-m", "pip", "install", package], 
-                              capture_output=False, text=True, check=False)
-        print(f"   {package} installation completed with code: {result.returncode}")
+    # Then install OpenVINO packages separately
+    print(f"\nInstalling OpenVINO packages (version: {openvino_version})...")
+    print(f"📦 Installing {len(ov_packages)} OpenVINO packages: {', '.join(ov_packages)}")
+    
+    ov_install_cmd = [str(venv_python), "-m", "pip", "install"]
+    if use_pre_flag:
+        ov_install_cmd.append("--pre")
+    ov_install_cmd.extend(["-U"] + ov_packages)
+    
+    # Always add OpenVINO storage index (required for Windows)
+    if use_nightly_index:
+        # Use the nightly index
+        ov_install_cmd.extend(["--extra-index-url", "https://storage.openvinotoolkit.org/simple/wheels/nightly", "--trusted-host", "storage.openvinotoolkit.org"])
+    else:
+        # Try pre-release index for other versions
+        ov_install_cmd.extend(["--extra-index-url", "https://storage.openvinotoolkit.org/simple/wheels/pre-release", "--trusted-host", "storage.openvinotoolkit.org"])
+    
+    result = subprocess.run(ov_install_cmd, capture_output=False, text=True, check=False)
+    print(f"   OpenVINO packages installation completed with code: {result.returncode}")
+    if result.returncode != 0:
+        print(f"⚠️  Warning: OpenVINO packages installation had issues")
+    
+    # Install optimum-intel with openvino support
+    if not skip_optimum_intel:
+        print("\nInstalling optimum-intel with dependencies...")
+        optimum_cmd = [str(venv_python), "-m", "pip", "install", "optimum-intel[openvino]", "optimum==1.27.*", "onnx>=1.15.0", "onnxruntime"]
+        result = subprocess.run(optimum_cmd, capture_output=False, text=True, check=False)
+        print(f"   optimum-intel installation completed with code: {result.returncode}")
         if result.returncode != 0:
-            print(f"⚠️  Warning: {package} installation had issues")
+            print(f"⚠️  Warning: optimum-intel installation had issues")
+    else:
+        print("⚠️  Skipping optimum-intel installation")
     
     # Verify installation and print comprehensive version info
     print_library_versions()
+    
+    # Always return True - we want to continue even if optimum-intel failed
+    # The notebooks might still work with the packages we have
     return True
 
 
@@ -230,21 +289,50 @@ def setup_environment(openvino_version="nightly", optimum_intel_version="latest"
 def create_diff_report(topology, device, notebooks_dir):
     """Create a diff report notebook showing what was patched."""
     try:
-        # Import the diff creation functionality
-        import create_diff_notebook
-        
         print(f"\n📊 Creating diff report for {topology} on {device}...")
         
-        notebooks_path = Path(notebooks_dir)
-        output_path = create_diff_notebook.create_diff_notebook(notebooks_path, topology, device)
+        # Get venv Python executable
+        venv_path = Path("C:/venv_llm") if sys.platform == "win32" else Path("llm_test_venv")
+        venv_python = venv_path / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
         
-        print(f"✅ Diff report created: {output_path}")
-        print(f"📖 Open with: jupyter notebook {output_path}")
+        if not venv_python.exists():
+            print(f"⚠️  Virtual environment not found at {venv_python}")
+            print("   Skipping diff report creation")
+            return False
         
-        return True
+        # Run create_diff_notebook using venv Python
+        create_diff_script = Path("create_diff_notebook.py")
+        if not create_diff_script.exists():
+            print(f"⚠️  Diff creation script not found: {create_diff_script}")
+            return False
+        
+        # Run the diff creation script
+        cmd = [
+            str(venv_python),
+            "-c",
+            f"import sys; sys.path.insert(0, '.'); "
+            f"from create_diff_notebook import create_diff_notebook; "
+            f"from pathlib import Path; "
+            f"print(create_diff_notebook(Path('{notebooks_dir}'), '{topology}', '{device}'))"
+        ]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        
+        if result.returncode == 0:
+            output_path = result.stdout.strip().split('\n')[-1]  # Get last line (the path)
+            print(f"✅ Diff report created: {output_path}")
+            print(f"📖 Open with: jupyter notebook {output_path}")
+            return True
+        else:
+            print(f"❌ Failed to create diff report")
+            if result.stderr:
+                print(f"   Error: {result.stderr}")
+            return False
         
     except Exception as e:
         print(f"❌ Failed to create diff report: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 

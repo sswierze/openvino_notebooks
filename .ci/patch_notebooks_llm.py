@@ -578,7 +578,7 @@ def patch_notebook(notebook_path, test_device="CPU", topology=None):
     with open(test_notebook_path, "w", encoding="utf-8") as f:
         nbformat.write(nb, f)
     
-    print(f"✅ Successfully created test notebook: {test_notebook_path}")
+    print(f"[OK] Successfully created test notebook: {test_notebook_path}")
     return test_notebook_path
 
 def main():
@@ -628,10 +628,10 @@ def main():
             test_notebook = patch_notebook(notebook_path, args.test_device, args.topology)
             patched_notebooks.append(test_notebook)
         except Exception as e:
-            print(f"❌ Failed to patch {notebook_path}: {e}")
+            print(f"[ERROR] Failed to patch {notebook_path}: {e}")
             continue
     
-    print(f"\n✅ Successfully patched {len(patched_notebooks)} notebooks")
+    print(f"\n[OK] Successfully patched {len(patched_notebooks)} notebooks")
     for nb in patched_notebooks:
         print(f"  - {nb}")
     
