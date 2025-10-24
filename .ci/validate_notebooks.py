@@ -227,6 +227,7 @@ def run_test(notebook_path: Path, root, timeout=7200, keep_artifacts=False, repo
         collect_python_packages(report_dir / (patched_notebook.stem + "_env_before.txt"))
 
         main_command = [sys.executable, "-m", "treon", "--verbose", str(patched_notebook)]
+        print(f"🔍 Executing: {' '.join(main_command)}", flush=True)
         start = time.perf_counter()
         try:
             retcode = subprocess.run(
@@ -237,6 +238,7 @@ def run_test(notebook_path: Path, root, timeout=7200, keep_artifacts=False, repo
         except subprocess.TimeoutExpired:
             retcode = -42
         duration = time.perf_counter() - start
+        print(f"⏱️  Execution completed in {duration:.2f} seconds with return code {retcode}", flush=True)
         ov_version_after = get_pip_package_version("openvino", "OpenVINO after notebook execution", "OpenVINO is missing")
         get_pip_package_version("openvino_tokenizers", "OpenVINO Tokenizers after notebook execution", "OpenVINO Tokenizers is missing")
         get_pip_package_version("openvino_genai", "OpenVINO GenAI after notebook execution", "OpenVINO GenAI is missing")
@@ -335,7 +337,9 @@ def main():
 
     for notebook, report in test_plan.items():
         if report["status"] == NotebookStatus.SKIPPED:
+            print(f"⏭️  Skipping {notebook} (status: SKIPPED)", flush=True)
             continue
+        print(f"🚀 About to run test for: {notebook}", flush=True)
         test_result = run_test(report["path"], root, args.timeout, keep_artifacts, reports_dir.absolute())
         timing = 0
         if not test_result:
